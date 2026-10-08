@@ -32,7 +32,7 @@ function makeSheet() {
   };
 }
 
-function load({ pages = {}, key = 'test-key', reviewsStatus = 200, top = [], cookie = '' } = {}) {
+function load({ pages = {}, key = 'test-key', reviewsStatus = 200, top = [], details = {}, cookie = '' } = {}) {
   const sheets = {};
   const props = { RAPIDAPI_KEY: key, AMAZON_COOKIE: cookie };
   const calls = [];
@@ -61,6 +61,9 @@ function load({ pages = {}, key = 'test-key', reviewsStatus = 200, top = [], coo
         const q = Object.fromEntries(u.searchParams);
         q.path = u.pathname;
         calls.push(q);
+        if (u.pathname === '/product-details') {
+          return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ status: 'OK', data: details }) };
+        }
         if (u.pathname === '/top-product-reviews') {
           return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ status: 'OK', data: { reviews: top } }) };
         }
@@ -189,4 +192,26 @@ test('sends a trimmed Amazon cookie when set', () => {
   state = ctx.fetchReviewsChunk(state);
   assert.strictEqual(calls[0].cookie, 'session-id=1; ubid-main=2; at-main=3; x-main=4');
   assert.strictEqual(calls[0].star_rating, undefined);
+});
+
+test('finds reviews under other field names, falling back to product details', () => {
+  const details = {
+    product_title: 'Foundation',
+    product_num_ratings: 57,
+    product_information: { top_reviews: [{ rating: '4.0 out of 5 stars', title: 'Nice', body: 'Blends well', author: 'Kim', date: 'May 2, 2026' }] }
+  };
+  const { ctx, sheets } = load({ reviewsStatus: 500, top: [], details });
+  let state = ctx.startProduct('B0G1VBDXYF', false);
+  while (!state.done) state = ctx.fetchReviewsChunk(state);
+  assert.strictEqual(state.added, 1);
+  const row = sheets.Reviews.rows[1];
+  assert.deepStrictEqual([row[3], row[4], row[5], row[6]], [4, 'Nice', 'Blends well', 'Kim']);
+  assert.strictEqual(sheets.Products.rows[1][6], 57);
+});
+
+test('explains what came back when no reviews are found', () => {
+  const { ctx } = load({ reviewsStatus: 500, top: [], details: { product_title: 'X' } });
+  let state = ctx.startProduct('B0G1VBDXYF', false);
+  while (!state.done) state = ctx.fetchReviewsChunk(state);
+  assert.match(state.note, /product details keys: product_title/);
 });

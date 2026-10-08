@@ -137,11 +137,14 @@ function testApiConnection() {
   var report = [];
   [
     ['/product-reviews', reviewParams_(parsed.asin, parsed.country, buildFilters(false)[0], 1, null)],
-    ['/top-product-reviews', { asin: parsed.asin, country: parsed.country }]
+    ['/top-product-reviews', { asin: parsed.asin, country: parsed.country }],
+    ['/product-details', { asin: parsed.asin, country: parsed.country }]
   ].forEach(function (c) {
     var r = rawApiCall_(c[0], c[1]);
-    var count = r.json ? extractReviews_(r.json.data).length : 0;
-    report.push(c[0] + '  →  HTTP ' + r.code + ', ' + count + ' reviews\n' + r.text.slice(0, 600));
+    var data = r.json && r.json.data;
+    var count = extractReviews_(data).length;
+    report.push(c[0] + '  →  HTTP ' + r.code + ', ' + count + ' reviews found\n' +
+      'keys: ' + describeKeys_(data) + '\n' + r.text.slice(0, 400));
   });
   report.push('Amazon cookie set: ' + (getCookie_() ? 'yes' : 'no'));
   ui.alert('API test for ' + parsed.asin, report.join('\n\n'), ui.ButtonSet.OK);
@@ -297,8 +300,19 @@ function fetchReviewsChunk(state) {
       if (state.mode === 'top') {
         var top = callApi_('/top-product-reviews', { asin: state.asin, country: state.country });
         var topReviews = extractReviews_(top);
+        if (!topReviews.length) {
+          // Product details usually include the same top reviews as part of the listing.
+          var details = callApi_('/product-details', { asin: state.asin, country: state.country });
+          topReviews = extractReviews_(details);
+          if (!topReviews.length) {
+            state.note = 'No reviews found in the API response (top reviews keys: ' + describeKeys_(top) +
+              '; product details keys: ' + describeKeys_(details) + '). Run Amazon Reviews > Test API connection and share the result.';
+          }
+          if (!state.totalRatings && details) {
+            state.totalRatings = details.product_num_ratings || details.total_ratings || '';
+          }
+        }
         addReviews(topReviews);
-        if (!topReviews.length) state.note = 'Amazon returned no public reviews for this product.';
         state.done = true;
         break;
       }
@@ -404,10 +418,41 @@ function trimCookie_(cookie) {
 }
 
 /** The review list can come back as data.reviews, data.top_reviews, or a bare array. */
-function extractReviews_(data) {
-  if (!data) return [];
-  if (Array.isArray(data)) return data;
-  return data.reviews || data.top_reviews || data.product_reviews || [];
+/**
+ * Finds the list of reviews anywhere in an API response. Field names differ
+ * between endpoints and API versions, so this looks for the first array of
+ * objects that look like reviews instead of relying on one key.
+ */
+function extractReviews_(data, depth) {
+  depth = depth || 0;
+  if (!data || typeof data !== 'object' || depth > 4) return [];
+  if (Array.isArray(data)) {
+    if (data.length && looksLikeReview_(data[0])) return data;
+    for (var i = 0; i < data.length; i++) {
+      var inner = extractReviews_(data[i], depth + 1);
+      if (inner.length) return inner;
+    }
+    return [];
+  }
+  var preferred = ['reviews', 'top_reviews', 'product_reviews', 'customer_reviews'];
+  var keys = preferred.filter(function (k) { return k in data; })
+    .concat(Object.keys(data).filter(function (k) { return preferred.indexOf(k) === -1; }));
+  for (var j = 0; j < keys.length; j++) {
+    var found = extractReviews_(data[keys[j]], depth + 1);
+    if (found.length) return found;
+  }
+  return [];
+}
+
+function looksLikeReview_(o) {
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return false;
+  return Object.keys(o).some(function (k) { return /^review_|^(rating|stars?|body|comment|review)$/i.test(k); });
+}
+
+/** Short description of a response's shape, so "no reviews" messages show what actually came back. */
+function describeKeys_(data) {
+  if (!data || typeof data !== 'object') return String(data);
+  return Object.keys(data).slice(0, 15).join(', ') || 'empty';
 }
 
 function rawApiCall_(path, params) {
@@ -486,11 +531,12 @@ function reviewToRow(r, id, state, now) {
     state.asin,
     state.url,
     id,
-    Number(r.review_star_rating) || r.review_star_rating || '',
-    clip_(r.review_title),
-    clip_(r.review_comment),
-    clip_(r.review_author),
-    clip_(r.review_date),
+    parseFloat(pick_(r, ['review_star_rating', 'rating', 'stars', 'star_rating'])) ||
+      pick_(r, ['review_star_rating', 'rating', 'stars', 'star_rating']),
+    clip_(pick_(r, ['review_title', 'title'])),
+    clip_(pick_(r, ['review_comment', 'review_text', 'review_body', 'body', 'text', 'comment', 'content'])),
+    clip_(pick_(r, ['review_author', 'author', 'reviewer_name', 'author_name'])),
+    clip_(pick_(r, ['review_date', 'date'])),
     r.is_verified_purchase === true ? 'Yes' : r.is_verified_purchase === false ? 'No' : '',
     r.is_vine === true ? 'Yes' : r.is_vine === false ? 'No' : '',
     clip_(r.helpful_vote_statement),
@@ -499,6 +545,13 @@ function reviewToRow(r, id, state, now) {
     clip_(r.review_link),
     now
   ];
+}
+
+function pick_(o, keys) {
+  for (var i = 0; i < keys.length; i++) {
+    if (o[keys[i]] !== undefined && o[keys[i]] !== null && o[keys[i]] !== '') return o[keys[i]];
+  }
+  return '';
 }
 
 function formatVariant_(v) {
