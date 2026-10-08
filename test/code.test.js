@@ -7,7 +7,10 @@ const path = require('node:path');
 const vm = require('node:vm');
 const crypto = require('node:crypto');
 
-const SOURCE = fs.readFileSync(path.join(__dirname, '..', 'apps-script', 'Code.gs'), 'utf8');
+// Apps Script loads every .gs file into one shared scope, so concatenate them.
+const SOURCE = ['Code.gs', 'Fetch.gs', 'Api.gs', 'Sheets.gs']
+  .map((f) => fs.readFileSync(path.join(__dirname, '..', 'apps-script', f), 'utf8'))
+  .join('\n');
 
 function makeSheet() {
   const rows = [];

@@ -18,7 +18,10 @@ Amazon blocks scrapers and now requires a login to view most review pages, so th
    - Copy your `X-RapidAPI-Key` from the endpoint's page.
 2. **Create the sheet**
    - Open a new Google Sheet, then go to **Extensions → Apps Script**.
-   - Replace the contents of `Code.gs` with [`apps-script/Code.gs`](apps-script/Code.gs).
+   - The code is split into four script files so each one is short enough to paste reliably. For each file, select all in the editor, delete, then paste:
+     - [`apps-script/Code.gs`](apps-script/Code.gs) goes into the existing `Code.gs`.
+     - For [`Fetch.gs`](apps-script/Fetch.gs), [`Api.gs`](apps-script/Api.gs) and [`Sheets.gs`](apps-script/Sheets.gs), click **+ → Script** and name the new file `Fetch`, `Api` or `Sheets` (Google adds `.gs`).
+   - Each file starts with a line saying "file N of 4". Check that the first and last lines match the file on GitHub after pasting.
    - Click **+ → HTML**, name the file `Sidebar`, and paste in [`apps-script/Sidebar.html`](apps-script/Sidebar.html).
    - Optional: under **Project Settings**, enable "Show appsscript.json" and paste in [`apps-script/appsscript.json`](apps-script/appsscript.json). This limits the script's permissions to the current sheet.
    - Save, then reload the Google Sheet.
@@ -67,7 +70,7 @@ ASIN · Product URL · Review ID · Rating · Title · Review · Author · Date 
 ## Development
 
 ```bash
-npm test   # runs Code.gs against mocked Apps Script services
+npm test   # runs the .gs files against mocked Apps Script services
 ```
 
-To change the API provider or the limits, edit `CONFIG` and `callReviewsApi_` at the top of `Code.gs`.
+To change the limits, edit `CONFIG` in `Code.gs`. API calls live in `Api.gs`.
