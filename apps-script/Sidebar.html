@@ -106,15 +106,17 @@
         line.textContent = '✓ ' + state.asin + ': ' + state.added + ' new reviews, ' +
           state.reviewsInSheet + ' total in sheet';
         line.className = 'ok';
+        if (state.note) log('  ↳ ' + state.note);
       } catch (e) {
         var msg = (e && e.message) || String(e);
         line.textContent = '✗ ' + link + ': ' + msg;
         line.className = 'err';
         google.script.run.markProductError(link, msg);
-        if (/rejected the key|No RapidAPI key/.test(msg)) {
+        if (/rejected the request|No RapidAPI key/.test(msg)) {
           document.getElementById('keyBox').style.display = 'block';
           break;
         }
+        if (/HTTP 429/.test(msg)) break;
       }
     }
 

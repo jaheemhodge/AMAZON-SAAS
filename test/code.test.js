@@ -32,9 +32,9 @@ function makeSheet() {
   };
 }
 
-function load({ pages = {}, key = 'test-key' } = {}) {
+function load({ pages = {}, key = 'test-key', reviewsStatus = 200, top = [], cookie = '' } = {}) {
   const sheets = {};
-  const props = { RAPIDAPI_KEY: key };
+  const props = { RAPIDAPI_KEY: key, AMAZON_COOKIE: cookie };
   const calls = [];
   const ss = {
     getSheetByName: (n) => sheets[n] || null,
@@ -46,7 +46,8 @@ function load({ pages = {}, key = 'test-key' } = {}) {
     PropertiesService: {
       getDocumentProperties: () => ({
         getProperty: (k) => props[k] || null,
-        setProperty: (k, v) => { props[k] = v; }
+        setProperty: (k, v) => { props[k] = v; },
+        deleteProperty: (k) => { delete props[k]; }
       })
     },
     Utilities: {
@@ -56,9 +57,17 @@ function load({ pages = {}, key = 'test-key' } = {}) {
     },
     UrlFetchApp: {
       fetch(url) {
-        const q = Object.fromEntries(new URL(url).searchParams);
+        const u = new URL(url);
+        const q = Object.fromEntries(u.searchParams);
+        q.path = u.pathname;
         calls.push(q);
-        const reviews = (pages[`${q.sort_by}|${q.star_rating}|${q.page}`]) || [];
+        if (u.pathname === '/top-product-reviews') {
+          return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ status: 'OK', data: { reviews: top } }) };
+        }
+        if (reviewsStatus !== 200) {
+          return { getResponseCode: () => reviewsStatus, getContentText: () => JSON.stringify({ message: 'Amazon requires login' }) };
+        }
+        const reviews = (pages[`${q.sort_by}|${q.star_rating || 'ALL'}|${q.page}`]) || [];
         return {
           getResponseCode: () => 200,
           getContentText: () => JSON.stringify({ status: 'OK', data: { total_ratings: 1234, reviews } })
@@ -151,4 +160,33 @@ test('deep mode walks every star rating', () => {
 test('missing API key gives a clear error', () => {
   const { ctx } = load({ key: '' });
   assert.throws(() => ctx.startProduct('B0ABCDEF12', false), /No RapidAPI key/);
+});
+
+test('falls back to public top reviews when the full list fails', () => {
+  const { ctx, sheets, calls } = load({ reviewsStatus: 500, top: reviews('t', 8) });
+  let state = ctx.startProduct('B0G1VBDXYF', false);
+  let guard = 0;
+  while (!state.done && guard++ < 10) state = ctx.fetchReviewsChunk(state);
+  assert.strictEqual(state.added, 8);
+  assert.match(state.note, /HTTP 500: Amazon requires login/);
+  assert.match(state.note, /add an Amazon cookie/);
+  assert.strictEqual(sheets.Products.rows[1][3], 'Done (top reviews only)');
+  assert.strictEqual(calls.filter((c) => c.path === '/product-reviews').length, 3); // retried, then gave up
+});
+
+test('bad key and quota errors stop with the real reason', () => {
+  for (const [status, re] of [[403, /HTTP 403\): Amazon requires login/], [429, /quota reached \(HTTP 429\)/]]) {
+    const { ctx } = load({ reviewsStatus: status });
+    const state = ctx.startProduct('B0G1VBDXYF', false);
+    assert.throws(() => ctx.fetchReviewsChunk(state), re);
+  }
+});
+
+test('sends a trimmed Amazon cookie when set', () => {
+  const cookie = 'session-id=1; ubid-main=2; at-main=3; csm-hit=junk; x-main=4; skin=noskin';
+  const { ctx, calls } = load({ cookie, pages: { 'TOP_REVIEWS|ALL|1': reviews('a', 3) } });
+  let state = ctx.startProduct('B0G1VBDXYF', false);
+  state = ctx.fetchReviewsChunk(state);
+  assert.strictEqual(calls[0].cookie, 'session-id=1; ubid-main=2; at-main=3; x-main=4');
+  assert.strictEqual(calls[0].star_rating, undefined);
 });

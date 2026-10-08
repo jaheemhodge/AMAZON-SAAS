@@ -20,7 +20,10 @@ var CONFIG = {
   // Stop a filter early after this many pages in a row with no new reviews.
   MAX_STALE_PAGES: 2,
   MAX_CELL_CHARS: 49000,
-  API_KEY_PROPERTY: 'RAPIDAPI_KEY'
+  API_KEY_PROPERTY: 'RAPIDAPI_KEY',
+  // Optional Amazon session cookie. Amazon only shows the first page of reviews
+  // (~8 "top reviews") to logged-out visitors; the full review list needs a login.
+  COOKIE_PROPERTY: 'AMAZON_COOKIE'
 };
 
 var REVIEW_HEADERS = [
@@ -51,6 +54,8 @@ function onOpen() {
     .createMenu('Amazon Reviews')
     .addItem('Open review fetcher', 'showSidebar')
     .addItem('Set RapidAPI key', 'promptForApiKey')
+    .addItem('Set Amazon cookie (optional, unlocks all reviews)', 'promptForCookie')
+    .addItem('Test API connection', 'testApiConnection')
     .addSeparator()
     .addItem('Set up sheets', 'setupSheets')
     .addToUi();
@@ -93,6 +98,53 @@ function hasApiKey() {
 
 function getApiKey_() {
   return PropertiesService.getDocumentProperties().getProperty(CONFIG.API_KEY_PROPERTY);
+}
+
+function getCookie_() {
+  return PropertiesService.getDocumentProperties().getProperty(CONFIG.COOKIE_PROPERTY);
+}
+
+function promptForCookie() {
+  var ui = SpreadsheetApp.getUi();
+  var res = ui.prompt(
+    'Amazon cookie (optional)',
+    'Without this you only get the ~8 top reviews Amazon shows logged-out visitors.\n' +
+    'Paste the "cookie" request header from a logged-in Amazon tab (see README). ' +
+    'Leave empty and press OK to remove it.',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (res.getSelectedButton() !== ui.Button.OK) return;
+  var cookie = res.getResponseText().trim().replace(/^cookie:\s*/i, '');
+  var props = PropertiesService.getDocumentProperties();
+  if (cookie) {
+    props.setProperty(CONFIG.COOKIE_PROPERTY, cookie);
+    ui.alert('Amazon cookie saved.');
+  } else {
+    props.deleteProperty(CONFIG.COOKIE_PROPERTY);
+    ui.alert('Amazon cookie removed.');
+  }
+}
+
+/** Calls both review endpoints for one product and shows the raw result, for troubleshooting. */
+function testApiConnection() {
+  var ui = SpreadsheetApp.getUi();
+  if (!getApiKey_()) { ui.alert('Set your RapidAPI key first (Amazon Reviews > Set RapidAPI key).'); return; }
+  var res = ui.prompt('Test API connection', 'Paste one Amazon product link or ASIN:', ui.ButtonSet.OK_CANCEL);
+  if (res.getSelectedButton() !== ui.Button.OK) return;
+  var parsed = parseAmazonLink(res.getResponseText());
+  if (!parsed) { ui.alert('Could not find an ASIN in that link.'); return; }
+
+  var report = [];
+  [
+    ['/product-reviews', reviewParams_(parsed.asin, parsed.country, buildFilters(false)[0], 1, null)],
+    ['/top-product-reviews', { asin: parsed.asin, country: parsed.country }]
+  ].forEach(function (c) {
+    var r = rawApiCall_(c[0], c[1]);
+    var count = r.json ? extractReviews_(r.json.data).length : 0;
+    report.push(c[0] + '  →  HTTP ' + r.code + ', ' + count + ' reviews\n' + r.text.slice(0, 600));
+  });
+  report.push('Amazon cookie set: ' + (getCookie_() ? 'yes' : 'no'));
+  ui.alert('API test for ' + parsed.asin, report.join('\n\n'), ui.ButtonSet.OK);
 }
 
 function setupSheets() {
@@ -218,6 +270,9 @@ function buildFilters(deepMode) {
  * Fetches up to CONFIG.PAGES_PER_CALL pages for the job, appends new reviews
  * to the sheet and returns the updated state. The sidebar calls this until
  * state.done is true.
+ *
+ * If the full review list fails before any page succeeds (usually because
+ * Amazon wants a logged-in session), it falls back to the public top reviews.
  */
 function fetchReviewsChunk(state) {
   var reviewsSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.REVIEWS_SHEET);
@@ -225,23 +280,55 @@ function fetchReviewsChunk(state) {
   var newRows = [];
   var now = new Date();
 
+  function addReviews(reviews) {
+    var added = 0;
+    reviews.forEach(function (r) {
+      var id = r.review_id || hashReview_(r);
+      if (seen[id]) return;
+      seen[id] = true;
+      added++;
+      newRows.push(reviewToRow(r, id, state, now));
+    });
+    return added;
+  }
+
   try {
     for (var n = 0; n < CONFIG.PAGES_PER_CALL && !state.done; n++) {
-      var filter = state.filters[state.filterIndex];
-      var data = callReviewsApi_(state.asin, state.country, filter, state.page);
-      var reviews = (data && data.reviews) || [];
-      if (data && (data.total_ratings || data.total_reviews) && !state.totalRatings) {
-        state.totalRatings = data.total_ratings || data.total_reviews;
+      if (state.mode === 'top') {
+        var top = callApi_('/top-product-reviews', { asin: state.asin, country: state.country });
+        var topReviews = extractReviews_(top);
+        addReviews(topReviews);
+        if (!topReviews.length) state.note = 'Amazon returned no public reviews for this product.';
+        state.done = true;
+        break;
       }
 
-      var newOnPage = 0;
-      reviews.forEach(function (r) {
-        var id = r.review_id || hashReview_(r);
-        if (seen[id]) return;
-        seen[id] = true;
-        newOnPage++;
-        newRows.push(reviewToRow(r, id, state, now));
-      });
+      var filter = state.filters[state.filterIndex];
+      var data;
+      try {
+        data = callApi_('/product-reviews',
+          reviewParams_(state.asin, state.country, filter, state.page, state.cursor));
+      } catch (e) {
+        if (e.fatal) throw e;
+        state.lastError = e.message;
+        if (!state.pagesOk) {
+          state.mode = 'top';
+          state.note = 'Full review list unavailable (' + e.message + '). Got Amazon\'s public top reviews instead' +
+            (getCookie_() ? '.' : ' — add an Amazon cookie to get all reviews.');
+          continue;
+        }
+        state.note = 'Stopped early: ' + e.message;
+        state.done = true;
+        break;
+      }
+      state.pagesOk = (state.pagesOk || 0) + 1;
+
+      var reviews = extractReviews_(data);
+      if ((data.total_ratings || data.total_reviews) && !state.totalRatings) {
+        state.totalRatings = data.total_ratings || data.total_reviews;
+      }
+      var newOnPage = addReviews(reviews);
+      var nextCursor = data.next_cursor || data.cursor || null;
 
       state.stalePages = newOnPage === 0 ? state.stalePages + 1 : 0;
       var filterExhausted =
@@ -249,15 +336,18 @@ function fetchReviewsChunk(state) {
         reviews.length < 10 ||
         state.page >= CONFIG.MAX_PAGES_PER_FILTER ||
         state.stalePages >= CONFIG.MAX_STALE_PAGES ||
-        (data && data.has_next_page === false);
+        data.has_next_page === false ||
+        (nextCursor && nextCursor === state.cursor);
 
       if (filterExhausted) {
         state.filterIndex++;
         state.page = 1;
+        state.cursor = null;
         state.stalePages = 0;
         if (state.filterIndex >= state.filters.length) state.done = true;
       } else {
         state.page++;
+        state.cursor = nextCursor;
       }
     }
   } finally {
@@ -273,9 +363,11 @@ function fetchReviewsChunk(state) {
   state.reviewsInSheet = inSheet;
   state.progress = state.done
     ? 'Done'
-    : 'Filter ' + (state.filterIndex + 1) + '/' + state.filters.length + ', page ' + state.page;
+    : state.mode === 'top'
+      ? 'Getting top reviews'
+      : 'Filter ' + (state.filterIndex + 1) + '/' + state.filters.length + ', page ' + state.page;
   upsertProductRow_(state.link, state, {
-    status: state.done ? 'Done' : 'Running…',
+    status: state.done ? (state.mode === 'top' ? 'Done (top reviews only)' : 'Done') : 'Running…',
     inSheet: inSheet,
     added: state.added,
     totalRatings: state.totalRatings
@@ -289,50 +381,99 @@ function markProductError(link, message) {
   upsertProductRow_(link, parsed, { status: 'Error: ' + message });
 }
 
-function callReviewsApi_(asin, country, filter, page) {
-  var params = {
-    asin: asin,
-    country: country,
-    page: page,
-    sort_by: filter.sort,
-    star_rating: filter.star,
-    verified_purchases_only: 'false',
-    images_or_videos_only: 'false',
-    current_format_only: 'false'
-  };
+function reviewParams_(asin, country, filter, page, cursor) {
+  var params = { asin: asin, country: country, sort_by: filter.sort };
+  if (filter.star !== 'ALL') params.star_rating = filter.star;
+  if (cursor) params.cursor = cursor;
+  else params.page = page;
+  var cookie = getCookie_();
+  if (cookie) params.cookie = trimCookie_(cookie);
+  return params;
+}
+
+/**
+ * Keeps only the Amazon login cookies the API needs. Apps Script caps request
+ * URLs at about 2 KB, and a full browser cookie header is usually longer.
+ */
+function trimCookie_(cookie) {
+  var keep = /^(session-id|session-id-time|session-token|ubid-[a-z]+|at-[a-z]+|sess-at-[a-z]+|x-[a-z]+|i18n-prefs|lc-[a-z]+)$/i;
+  return cookie.split(';')
+    .map(function (c) { return c.trim(); })
+    .filter(function (c) { return keep.test(c.split('=')[0]); })
+    .join('; ');
+}
+
+/** The review list can come back as data.reviews, data.top_reviews, or a bare array. */
+function extractReviews_(data) {
+  if (!data) return [];
+  if (Array.isArray(data)) return data;
+  return data.reviews || data.top_reviews || data.product_reviews || [];
+}
+
+function rawApiCall_(path, params) {
   var query = Object.keys(params)
     .map(function (k) { return k + '=' + encodeURIComponent(params[k]); })
     .join('&');
-  var url = 'https://' + CONFIG.API_HOST + '/product-reviews?' + query;
-  var options = {
+  var url = 'https://' + CONFIG.API_HOST + path + '?' + query;
+  if (url.length > 2000) {
+    return { code: 0, text: 'Request too long for Google Apps Script (' + url.length +
+      ' chars). Your Amazon cookie is too long; paste only the session-id, session-token, ubid-main, at-main, sess-at-main and x-main values.', json: null };
+  }
+  var res = UrlFetchApp.fetch(url, {
     method: 'get',
     muteHttpExceptions: true,
     headers: {
       'x-rapidapi-key': getApiKey_(),
       'x-rapidapi-host': CONFIG.API_HOST
     }
-  };
+  });
+  var text = res.getContentText();
+  var json = null;
+  try { json = JSON.parse(text); } catch (e) { /* not JSON */ }
+  return { code: res.getResponseCode(), text: text, json: json };
+}
 
+/** Calls the API with retries. Throws errors with .fatal = true when retrying other products is pointless. */
+function callApi_(path, params) {
+  var r;
   for (var attempt = 0; attempt < 3; attempt++) {
-    var res = UrlFetchApp.fetch(url, options);
-    var code = res.getResponseCode();
-    if (code === 429 || code >= 500) {
-      Utilities.sleep(2000 * Math.pow(2, attempt));
+    r = rawApiCall_(path, params);
+    if (r.code === 429 || r.code >= 500) {
+      if (attempt < 2) Utilities.sleep(2000 * Math.pow(2, attempt));
       continue;
     }
-    if (code === 401 || code === 403) {
-      throw new Error('RapidAPI rejected the key (HTTP ' + code + '). Check your key and that you are subscribed to Real-Time Amazon Data.');
-    }
-    if (code !== 200) {
-      throw new Error('API error HTTP ' + code + ': ' + res.getContentText().slice(0, 200));
-    }
-    var json = JSON.parse(res.getContentText());
-    if (json.status && json.status !== 'OK') {
-      throw new Error('API returned status ' + json.status + ': ' + JSON.stringify(json.error || json).slice(0, 200));
-    }
-    return json.data || {};
+    break;
   }
-  throw new Error('API kept rate-limiting or failing after 3 attempts. Try again in a minute.');
+
+  var detail = apiErrorDetail_(r);
+  if (r.code === 401 || r.code === 403) {
+    throw fatalError_('RapidAPI rejected the request (HTTP ' + r.code + '): ' + detail +
+      '. Check your key and that you are subscribed to Real-Time Amazon Data.');
+  }
+  if (r.code === 429) {
+    throw fatalError_('RapidAPI rate limit or monthly quota reached (HTTP 429): ' + detail +
+      '. Wait a minute, or check your plan usage on RapidAPI.');
+  }
+  if (r.code !== 200 || !r.json) {
+    throw new Error('HTTP ' + r.code + ': ' + detail);
+  }
+  if (r.json.status && r.json.status !== 'OK') {
+    throw new Error('API status ' + r.json.status + ': ' + detail);
+  }
+  return r.json.data || {};
+}
+
+function apiErrorDetail_(r) {
+  var j = r.json;
+  var msg = j && (j.message || (j.error && (j.error.message || j.error)) || j.status);
+  if (msg && typeof msg !== 'string') msg = JSON.stringify(msg);
+  return String(msg || r.text || 'no response body').slice(0, 200);
+}
+
+function fatalError_(message) {
+  var e = new Error(message);
+  e.fatal = true;
+  return e;
 }
 
 // ---------------------------------------------------------------------------

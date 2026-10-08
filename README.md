@@ -29,6 +29,26 @@ Amazon blocks scrapers and now requires a login to view most review pages, so th
 
 To use the tool again in a new sheet, make a copy of this sheet (**File → Make a copy**). The script is copied with it.
 
+## Getting all reviews (Amazon cookie)
+
+Amazon only shows logged-out visitors the first page of reviews, about 8 "top reviews". Without a login, the tool gets those 8 automatically. To get the full review list, give the API a cookie from a logged-in Amazon session:
+
+1. In Chrome, log in to Amazon. Use a secondary account, not your seller or main buyer account.
+2. Open any product page and press **F12** to open DevTools, then click the **Network** tab.
+3. Refresh the page and click the first request (the product page itself).
+4. Under **Request Headers**, find `cookie:` and copy its value.
+5. In the sheet, choose **Amazon Reviews → Set Amazon cookie** and paste it.
+
+The tool keeps only the login cookies the API needs. Cookies expire after a while; if the tool falls back to top reviews again, paste a fresh one.
+
+## Troubleshooting
+
+Use **Amazon Reviews → Test API connection** to see the raw response from the API for one product.
+
+- **HTTP 403**: the key is wrong, or you aren't subscribed to Real-Time Amazon Data.
+- **HTTP 429**: you've hit your plan's rate limit or monthly quota.
+- **"Done (top reviews only)" in the Products tab**: the full review list needs an Amazon cookie (see above).
+
 ## How many reviews will I get?
 
 Amazon only shows about 10 pages (about 100 reviews) for each sort and filter combination. The tool pulls from several combinations and removes duplicates:
