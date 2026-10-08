@@ -1,0 +1,9 @@
+{
+  "name": "amazon-reviews-to-sheets",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Paste Amazon product links into a Google Sheet sidebar and pull every review into the sheet.",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}

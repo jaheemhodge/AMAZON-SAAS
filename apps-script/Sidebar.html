@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    body { font-family: Arial, sans-serif; font-size: 13px; color: #202124; margin: 12px; }
+    h3 { margin: 0 0 8px; font-size: 15px; }
+    textarea { width: 100%; box-sizing: border-box; height: 160px; font-size: 12px; padding: 6px; }
+    input[type=password] { width: 100%; box-sizing: border-box; padding: 6px; }
+    button { background: #1a73e8; color: #fff; border: 0; border-radius: 4px; padding: 8px 14px; cursor: pointer; font-size: 13px; }
+    button.secondary { background: #fff; color: #1a73e8; border: 1px solid #dadce0; }
+    button:disabled { opacity: .5; cursor: default; }
+    .row { margin: 10px 0; }
+    .hint { color: #5f6368; font-size: 11px; margin-top: 4px; }
+    #log { margin-top: 12px; max-height: 320px; overflow-y: auto; font-size: 12px; border-top: 1px solid #eee; padding-top: 8px; }
+    #log div { padding: 3px 0; border-bottom: 1px solid #f1f3f4; }
+    .ok { color: #188038; } .err { color: #d93025; }
+    #keyBox { display: none; background: #fef7e0; padding: 8px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h3>Amazon reviews → this sheet</h3>
+
+  <div id="keyBox" class="row">
+    <div>Paste your RapidAPI key first:</div>
+    <input type="password" id="apiKey" placeholder="RapidAPI key">
+    <div class="row"><button onclick="saveKey()">Save key</button></div>
+  </div>
+
+  <div class="row">
+    <textarea id="links" placeholder="Paste Amazon product links, one per line&#10;https://www.amazon.com/dp/B0XXXXXXXX&#10;https://amzn.to/xxxxxx"></textarea>
+    <div class="hint">Full links, short links (amzn.to / a.co) or bare ASINs all work.</div>
+  </div>
+
+  <div class="row">
+    <label><input type="checkbox" id="deep"> Deep mode (more reviews, more API calls)</label>
+    <div class="hint">Off: ~200 reviews max per product (2 API sorts × 10 pages). On: also walks each star rating, up to ~1,200.</div>
+  </div>
+
+  <div class="row">
+    <button id="go" onclick="run()">Fetch reviews</button>
+    <button class="secondary" onclick="loadPending()">Load from Products tab</button>
+  </div>
+
+  <div id="log"></div>
+
+<script>
+  var running = false;
+
+  google.script.run.withSuccessHandler(function (has) {
+    document.getElementById('keyBox').style.display = has ? 'none' : 'block';
+  }).hasApiKey();
+
+  function saveKey() {
+    var key = document.getElementById('apiKey').value;
+    google.script.run
+      .withSuccessHandler(function () { document.getElementById('keyBox').style.display = 'none'; log('API key saved.', 'ok'); })
+      .withFailureHandler(function (e) { log(e.message, 'err'); })
+      .saveApiKey(key);
+  }
+
+  function loadPending() {
+    google.script.run.withSuccessHandler(function (links) {
+      if (!links.length) { log('No pending links in the Products tab.'); return; }
+      document.getElementById('links').value = links.join('\n');
+    }).getPendingLinks();
+  }
+
+  function log(msg, cls) {
+    var el = document.createElement('div');
+    el.textContent = msg;
+    if (cls) el.className = cls;
+    var box = document.getElementById('log');
+    box.insertBefore(el, box.firstChild);
+    return el;
+  }
+
+  function call(fn, arg1, arg2) {
+    return new Promise(function (resolve, reject) {
+      google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[fn](arg1, arg2);
+    });
+  }
+
+  async function run() {
+    if (running) return;
+    var links = document.getElementById('links').value
+      .split(/\s+/).map(function (s) { return s.trim(); }).filter(Boolean);
+    if (!links.length) { log('Paste at least one link.', 'err'); return; }
+
+    running = true;
+    document.getElementById('go').disabled = true;
+    var deep = document.getElementById('deep').checked;
+    var grandTotal = 0;
+
+    for (var i = 0; i < links.length; i++) {
+      var link = links[i];
+      var line = log('[' + (i + 1) + '/' + links.length + '] Starting ' + link);
+      try {
+        var state = await call('startProduct', link, deep);
+        while (!state.done) {
+          state = await call('fetchReviewsChunk', state);
+          line.textContent = '[' + (i + 1) + '/' + links.length + '] ' + state.asin + ': +' +
+            state.added + ' new (' + state.progress + ')';
+        }
+        grandTotal += state.added;
+        line.textContent = '✓ ' + state.asin + ': ' + state.added + ' new reviews, ' +
+          state.reviewsInSheet + ' total in sheet';
+        line.className = 'ok';
+      } catch (e) {
+        var msg = (e && e.message) || String(e);
+        line.textContent = '✗ ' + link + ': ' + msg;
+        line.className = 'err';
+        google.script.run.markProductError(link, msg);
+        if (/rejected the key|No RapidAPI key/.test(msg)) {
+          document.getElementById('keyBox').style.display = 'block';
+          break;
+        }
+      }
+    }
+
+    log('Finished. ' + grandTotal + ' new reviews added.', 'ok');
+    running = false;
+    document.getElementById('go').disabled = false;
+  }
+</script>
+</body>
+</html>
